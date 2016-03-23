@@ -10,7 +10,7 @@
 ##   Input:
 ##     'dat' = p by n data.frame or matrix , genomic measure matrix 
 ##                 ( dimensions: probe by sample )
-##     'batch' = numeric vector of batch association, length n
+##     'batch' = numeric or character vector of batch association, length n
 ##     'center' = numeric value of 'gold-standard' batch
 ##     'mod' = model matrix of potential covariates
 ##     'numCovs' = column number of variables in 'mod' to be treated as continuous variables 
@@ -21,22 +21,26 @@
 ############################################################
 # Function
 
-M.COMBAT <- function (dat, batch, center, mod, numCovs = NULL){
 
-  mod = cbind(mod, batch)
+M.COMBAT <- function (dat, batch, center , mod, numCovs = NULL ) 
+{
+  batch <- as.factor(batch)
+  batchmod <- model.matrix(~-1 + batch)
+  cat("Found", nlevels(batch), "batches\n")
+  n.batch <- nlevels(batch)
+  batches <- list()
 
-  # the next two lines remove the intercept from the model matrix
-  check = apply(mod, 2, function(x) all(x == 1))
-  mod = as.matrix(mod[, !check])
-  colnames(mod)[ncol(mod)] = "Batch"
+  for (i in 1:n.batch) {
+    batches[[i]] <- which(batch == levels(batch)[i])
+  }
+  names(batches) = levels(batch)
 
-  if (sum(check) > 0 & !is.null(numCovs)) 
-    numCovs = numCovs - 1
-
-  design <- sva:::design.mat(mod, numCov = numCovs)
-  batches <- sva:::list.batch(mod)
-  n.batch <- length(batches)
   n.batches <- sapply(batches, length)
+  n.array <- sum(n.batches)
+  design <- cbind(batchmod, mod)
+  check <- apply(design, 2, function(x) all(x == 1))
+  design <- as.matrix(design[, !check])
+  #n.batches <- sapply(batches, length)
   n.array <- sum(n.batches)
   NAs = any(is.na(dat))
   if (NAs) {
@@ -44,31 +48,26 @@ M.COMBAT <- function (dat, batch, center, mod, numCovs = NULL){
         sep = " ")
     stop()
   }
-  # until here same as ComBat, except no NA values allowed, and ComBat
-  # seems to have some kind of untraceable Beta.NA internal function. 
   cat("Standardizing Data across genes\n")
-
-  # compute B.hat using all batches
+  
   B.hat <- solve(t(design) %*% design) %*% t(design) %*% t(as.matrix(dat))
   
   # variance of batch of interest
   var.batch <- apply(dat[, batch==center], 1, var)
-  
-  # batch gene-wise means and standard deviations
-  stand.mean =  matrix(NA,nrow(dat),ncol(dat))
-  stand.sds = matrix(NA,nrow(dat),ncol(dat))  # initialize stand.mean and stand.sds
 
+  # batch gene-wise means and standard deviations
+  stand.mean=stand.sds <- matrix(NA,nrow(dat),ncol(dat))
   for( i in 1:n.batch){
-    stand.mean[,batch==levels(as.factor(batch))[i]] = matrix(B.hat[i,],nrow(dat),n.batches[i])
-    stand.sds[,batch==levels(as.factor(batch))[i]] = matrix(apply(dat[,batch==levels(as.factor(batch))[i]],1,sd),nrow(dat),n.batches[i])
+    stand.mean[, batch==names(batches)[i] ] <- matrix(B.hat[i,],nrow(dat),n.batches[i])
+    stand.sds[, batch==names(batches)[i] ] <- matrix(apply(dat[,batch==names(batches)[i]],1,sd),nrow(dat),n.batches[i])
   }
   
   # accounts for covariates here
   if (!is.null(design)) {
     tmp <- design
     tmp[, c(1:n.batch)] <- 0
-    stand.mean <- stand.mean + t(tmp %*% B.hat)
-  }
+    stand.mean <- stand.mean + t(tmp %*% B.hat)}
+  
   
   # standardized data
   s.data <- (dat - stand.mean)/(stand.sds)
@@ -78,7 +77,6 @@ M.COMBAT <- function (dat, batch, center, mod, numCovs = NULL){
   
   gamma.hat <- solve(t(batch.design) %*% batch.design) %*% t(batch.design) %*% t(as.matrix(s.data))
   
-  # calculate delta.hat from the standardized data
   delta.hat <- NULL
   for (i in batches) {
     delta.hat <- rbind(delta.hat, apply(s.data[, i], 1, var,  na.rm = T)) }
@@ -98,11 +96,11 @@ M.COMBAT <- function (dat, batch, center, mod, numCovs = NULL){
     gamma.star <- rbind(gamma.star, temp[1, ])
     delta.star <- rbind(delta.star, temp[2, ])
   }
-
+  
   cat("Adjusting the Data\n")
   bayesdata <- s.data
   
-  k <- (1:n.batch)[- which(levels(as.factor(batch))==center)]
+  k <- (1:n.batch)[-which(names(batches)==center)]
   
   for( t in 1:length(k)){
     
@@ -111,11 +109,11 @@ M.COMBAT <- function (dat, batch, center, mod, numCovs = NULL){
     bayesdata[, i] <- (bayesdata[, i] - t(batch.design[i, ] %*% gamma.star))/(sqrt(delta.star[j, ]) %*% t(rep(1,  n.batches[j])))
     
   }
-  bayesdata <- (bayesdata * (sqrt(var.batch) %*% t(rep(1, n.array)))) + matrix( B.hat[which(levels(as.factor(batch))==center),] , nrow(dat) , ncol(dat))
+  
+  bayesdata <- (bayesdata * (sqrt(var.batch) %*% t(rep(1, n.array)))) + matrix( B.hat[which(names(batches)==center),] , nrow(dat) , ncol(dat))
   
   return(bayesdata)
 }
-
 
 #############
 # Sample Code
@@ -141,8 +139,8 @@ mod <- matrix(rep(1,length(batch)),length(batch),1)
 
 # perform ComBat and M-ComBat transformations on data set
 RES1 <- ComBat( C , batch , mod )  
-RES2 <- M.COMBAT( C , batch , center=1 , mod )  # perform  M-ComBat centered at batch 1
-RES3 <- M.COMBAT( C , batch , center=2 , mod )  # perform  M-ComBat centered at batch 2
+RES2 <- M.COMBAT.original( C , batch , center=1 , mod )  # perform  M-ComBat centered at batch 1
+RES3 <- M.COMBAT.original( C , batch , center=2 , mod )  # perform  M-ComBat centered at batch 2
 
 pdf('example.pdf')
 # paired scatterplots
@@ -154,8 +152,8 @@ dev.off()
 
 # the batch parameter can also be a string:
 batch = c( rep( 'data from X' , ncol(A)) , rep( 'data from Y' , ncol(B) ))
-RES2 <- M.COMBAT( C , batch , center='data from X' , mod )  # perform  M-ComBat centered at batch 1
-RES3 <- M.COMBAT( C , batch , center='data from Y' , mod )  # perform  M-ComBat centered at batch 2
+RES2 <- M.COMBAT.original( C , batch , center='data from X' , mod )  # perform  M-ComBat centered at batch 1
+RES3 <- M.COMBAT.original( C , batch , center='data from Y' , mod )  # perform  M-ComBat centered at batch 2
 
 pairs(data.frame(t(RES2)),col=c("blue","red"),xlim=c(0,max(RES2)),ylim=c(0,max(RES2)),gap=0)  # M-CoMBat (batch1 center)
 pairs(data.frame(t(RES3)),col=c("blue","red"),xlim=c(0,max(RES3)),ylim=c(0,max(RES3)),gap=0)  # M-CoMBat (batch2 center)
